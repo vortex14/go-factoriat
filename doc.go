@@ -1,17 +1,17 @@
 // Package factoriat implements an information-transistor pattern.
 //
 // A Factoriat receives input factors as signals, accumulates them into live
-// memory, evaluates an activation gate, builds a fact from an independent
-// memory snapshot, stabilizes live memory, and emits the fact outside the
+// memory, evaluates an activation gate, builds facts from an independent
+// memory snapshot, stabilizes live memory, and emits the facts outside the
 // internal lock.
 //
 // Lifecycle:
 //
 //	Capture   -> write the input factor into live memory
 //	Evaluate  -> run the activation gate
-//	Build     -> create a fact from a State snapshot
+//	Build     -> create facts from a State snapshot
 //	Stabilize -> move live memory into its next stable shape
-//	Emit      -> publish the fact after the lock is released
+//	Emit      -> publish each fact after the lock is released
 //
 // Invariants:
 //
@@ -19,7 +19,7 @@
 //   - Evaluate is the activation gate: it decides whether the current state is active.
 //   - Build receives an independent State snapshot and must not control live memory.
 //   - Stabilize receives live memory and is the only post-fact state transition hook.
-//   - Emit runs after the internal mutex is unlocked, so callbacks may push again.
+//   - Emit runs after the internal mutex is unlocked, once per built fact, in order.
 //   - PushResult reports runtime outcomes and optional stage errors through Err.
 //   - StateRepository persists StateRecord, including Triggered for edge mode.
 //

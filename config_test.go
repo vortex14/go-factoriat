@@ -8,8 +8,8 @@ func validConfig() Config[int, int] {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Emit: func(_ int) error { return nil },
 	}
@@ -59,8 +59,8 @@ func TestConfig_ValidateAllowsErrorReturningLifecycle(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Stabilize: func(_ *State[int]) error {
 			return nil

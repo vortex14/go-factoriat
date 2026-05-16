@@ -14,8 +14,8 @@ func TestPushResult_CaptureError(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Emit: func(_ int) error { return nil },
 	})
@@ -40,8 +40,8 @@ func TestPushResult_EvaluateError(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return false, want
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Emit: func(_ int) error { return nil },
 	})
@@ -63,8 +63,8 @@ func TestPushResult_BuildError(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 0, want
+		Build: func(_ *State[int]) ([]int, error) {
+			return nil, want
 		},
 		Emit: func(_ int) error { return nil },
 	})
@@ -86,8 +86,8 @@ func TestPushResult_StabilizeError(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Stabilize: func(_ *State[int]) error {
 			return want
@@ -112,8 +112,8 @@ func TestPushResult_EmitError(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Emit: func(_ int) error {
 			return want

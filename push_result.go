@@ -10,7 +10,8 @@ const (
 )
 
 type PushResult struct {
-	Status  PushStatus
-	Emitted bool
-	Err     error
+	Status       PushStatus
+	Emitted      bool
+	EmittedCount int
+	Err          error
 }

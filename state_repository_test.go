@@ -68,8 +68,8 @@ func TestPush_UsesConfiguredStateRepository(t *testing.T) {
 			Evaluate: func(st *State[int], _ int) (bool, error) {
 				return st.Count() >= 2, nil
 			},
-			Build: func(st *State[int]) (int, error) {
-				return st.Count(), nil
+			Build: func(st *State[int]) ([]int, error) {
+				return []int{st.Count()}, nil
 			},
 			Emit: func(_ int) error {
 				return nil
@@ -106,8 +106,8 @@ func TestPush_PersistsTriggeredFlagInStateRepository(t *testing.T) {
 			Evaluate: func(st *State[int], _ int) (bool, error) {
 				return st.Count() >= 1, nil
 			},
-			Build: func(st *State[int]) (int, error) {
-				return st.Count(), nil
+			Build: func(st *State[int]) ([]int, error) {
+				return []int{st.Count()}, nil
 			},
 			Emit: func(_ int) error {
 				emitted++
@@ -155,8 +155,8 @@ func TestPush_ReturnsFailedWhenStateRepositoryLoadFails(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Emit: func(_ int) error { return nil },
 	})
@@ -180,8 +180,8 @@ func TestPush_ReturnsFailedWhenStateRepositorySaveFails(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(_ *State[int]) (int, error) {
-			return 1, nil
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
 		},
 		Emit: func(_ int) error { return nil },
 	})

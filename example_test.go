@@ -23,8 +23,8 @@ func Example_threshold() {
 		Evaluate: func(st *factoriat.State[int], _ int) (bool, error) {
 			return factoriat.MetaOr(st, metaTotal, 0) >= 1000, nil
 		},
-		Build: func(st *factoriat.State[int]) (LargePurchaseFact, error) {
-			return LargePurchaseFact{Total: factoriat.MetaOr(st, metaTotal, 0)}, nil
+		Build: func(st *factoriat.State[int]) ([]LargePurchaseFact, error) {
+			return []LargePurchaseFact{{Total: factoriat.MetaOr(st, metaTotal, 0)}}, nil
 		},
 		Stabilize: func(st *factoriat.State[int]) error {
 			st.Reset()
@@ -72,12 +72,12 @@ func Example_slidingWindow() {
 		Evaluate: func(st *factoriat.State[LoginEvent], _ LoginEvent) (bool, error) {
 			return st.Count() == 5, nil
 		},
-		Build: func(st *factoriat.State[LoginEvent]) (BruteForceFact, error) {
+		Build: func(st *factoriat.State[LoginEvent]) ([]BruteForceFact, error) {
 			events := st.DataSnapshot()
-			return BruteForceFact{
+			return []BruteForceFact{{
 				UserID: events[0].UserID,
 				Count:  st.Count(),
-			}, nil
+			}}, nil
 		},
 		Stabilize: func(st *factoriat.State[LoginEvent]) error {
 			st.Reset()
@@ -118,8 +118,8 @@ func Example_edgeTrigger() {
 		Evaluate: func(st *factoriat.State[int], _ int) (bool, error) {
 			return factoriat.MetaOr(st, metaScore, 0) >= 80, nil
 		},
-		Build: func(st *factoriat.State[int]) (RiskFact, error) {
-			return RiskFact{Score: factoriat.MetaOr(st, metaScore, 0)}, nil
+		Build: func(st *factoriat.State[int]) ([]RiskFact, error) {
+			return []RiskFact{{Score: factoriat.MetaOr(st, metaScore, 0)}}, nil
 		},
 		Emit: func(fact RiskFact) error {
 			emitted = append(emitted, fact.Score)
@@ -164,9 +164,9 @@ func Example_pipeline() {
 		Evaluate: func(st *factoriat.State[SuspiciousLoginFact], _ SuspiciousLoginFact) (bool, error) {
 			return st.Count() >= 1, nil
 		},
-		Build: func(st *factoriat.State[SuspiciousLoginFact]) (SecurityAlertFact, error) {
+		Build: func(st *factoriat.State[SuspiciousLoginFact]) ([]SecurityAlertFact, error) {
 			fact, _ := st.Last()
-			return SecurityAlertFact{UserID: fact.UserID, Level: "high"}, nil
+			return []SecurityAlertFact{{UserID: fact.UserID, Level: "high"}}, nil
 		},
 		Emit: func(fact SecurityAlertFact) error {
 			emitted = append(emitted, fact)
@@ -184,9 +184,9 @@ func Example_pipeline() {
 		Evaluate: func(st *factoriat.State[LoginEvent], _ LoginEvent) (bool, error) {
 			return st.Count() >= 3, nil
 		},
-		Build: func(st *factoriat.State[LoginEvent]) (SuspiciousLoginFact, error) {
+		Build: func(st *factoriat.State[LoginEvent]) ([]SuspiciousLoginFact, error) {
 			event, _ := st.Last()
-			return SuspiciousLoginFact{UserID: event.UserID}, nil
+			return []SuspiciousLoginFact{{UserID: event.UserID}}, nil
 		},
 		Stabilize: func(st *factoriat.State[LoginEvent]) error {
 			st.Reset()

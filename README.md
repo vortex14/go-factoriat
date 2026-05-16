@@ -60,7 +60,7 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 
 - `CaptureRule[F]` — записывает входной фактор в живую память.
 - `EvaluateRule[F]` — решает, активен ли факториат.
-- `BuildRule[F,R]` — строит факт из независимого снимка памяти.
+- `BuildRule[F,R]` — строит один или несколько фактов из независимого снимка памяти.
 - `StabilizeRule[F]` — переводит живую память в следующее устойчивое состояние.
 - `EmitCallback[R]` — выпускает факт во внешний мир после unlock.
 
@@ -99,7 +99,8 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 - `Push(factor)` — обработать фактор без анализа результата.
 - `PushResult(factor)` — обработать фактор и вернуть runtime-исход.
 - `PushResult.Status` — статус обработки.
-- `PushResult.Emitted` — был ли выпущен факт.
+- `PushResult.Emitted` — был ли выпущен хотя бы один факт.
+- `PushResult.EmittedCount` — сколько фактов было успешно выпущено.
 - `PushResult.Err` — ошибка lifecycle-стадии, если она была.
 
 Статусы:
@@ -130,9 +131,9 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 - Lifecycle остаётся линейным: `Capture -> Evaluate -> Build -> Stabilize -> Emit`.
 - `Capture`, `Evaluate`, `Build` и `Emit` обязательны при создании факториата.
 - Каждый lifecycle hook возвращает `error`; первая ошибка останавливает обработку и возвращается через `PushResult.Err`.
-- `Build` получает независимый `State` snapshot и не управляет живой памятью.
+- `Build` получает независимый `State` snapshot, строит `[]R` и не управляет живой памятью.
 - `Stabilize` получает живую память и является единственной пост-фактной стадией изменения состояния.
-- `Emit` выполняется после освобождения внутреннего mutex.
+- `Emit` выполняется после освобождения внутреннего mutex, по одному разу на каждый построенный факт, в порядке `[]R`.
 - `State` управляется только через публичные методы; внутренние поля памяти остаются закрытыми.
 - Репозиторий состояния хранит `StateRecord`, то есть и живую память, и `Triggered`.
 - Доменный meta-контекст должен использовать `MetaKey[T]`, чтобы ключ и тип значения были связаны.
@@ -237,8 +238,8 @@ f := factoriat.MustNewFactoriat[int, LargePurchaseFact](factoriat.Config[int, La
 	Evaluate: func(st *factoriat.State[int], _ int) (bool, error) {
 		return factoriat.MetaOr(st, metaTotal, 0) >= 1000, nil
 	},
-	Build: func(st *factoriat.State[int]) (LargePurchaseFact, error) {
-		return LargePurchaseFact{Total: factoriat.MetaOr(st, metaTotal, 0)}, nil
+	Build: func(st *factoriat.State[int]) ([]LargePurchaseFact, error) {
+		return []LargePurchaseFact{{Total: factoriat.MetaOr(st, metaTotal, 0)}}, nil
 	},
 	Stabilize: func(st *factoriat.State[int]) error {
 		st.Reset()
@@ -284,12 +285,12 @@ f := factoriat.MustNewFactoriat[LoginEvent, BruteForceFact](factoriat.Config[Log
 	Evaluate: func(st *factoriat.State[LoginEvent], _ LoginEvent) (bool, error) {
 		return st.Count() == 5, nil
 	},
-	Build: func(st *factoriat.State[LoginEvent]) (BruteForceFact, error) {
+	Build: func(st *factoriat.State[LoginEvent]) ([]BruteForceFact, error) {
 		events := st.DataSnapshot()
-		return BruteForceFact{
+		return []BruteForceFact{{
 			UserID: events[0].UserID,
 			Count:  st.Count(),
-		}, nil
+		}}, nil
 	},
 	Stabilize: func(st *factoriat.State[LoginEvent]) error {
 		st.Reset()
@@ -328,8 +329,8 @@ f := factoriat.MustNewFactoriat[int, RiskFact](factoriat.Config[int, RiskFact]{
 	Evaluate: func(st *factoriat.State[int], _ int) (bool, error) {
 		return factoriat.MetaOr(st, metaScore, 0) >= 80, nil
 	},
-	Build: func(st *factoriat.State[int]) (RiskFact, error) {
-		return RiskFact{Score: factoriat.MetaOr(st, metaScore, 0)}, nil
+	Build: func(st *factoriat.State[int]) ([]RiskFact, error) {
+		return []RiskFact{{Score: factoriat.MetaOr(st, metaScore, 0)}}, nil
 	},
 	Emit: func(fact RiskFact) error {
 		return nil
@@ -365,9 +366,9 @@ alerts := factoriat.MustNewFactoriat[SuspiciousLoginFact, SecurityAlertFact](fac
 	Evaluate: func(st *factoriat.State[SuspiciousLoginFact], _ SuspiciousLoginFact) (bool, error) {
 		return st.Count() >= 1, nil
 	},
-	Build: func(st *factoriat.State[SuspiciousLoginFact]) (SecurityAlertFact, error) {
+	Build: func(st *factoriat.State[SuspiciousLoginFact]) ([]SecurityAlertFact, error) {
 		fact, _ := st.Last()
-		return SecurityAlertFact{UserID: fact.UserID, Level: "high"}, nil
+		return []SecurityAlertFact{{UserID: fact.UserID, Level: "high"}}, nil
 	},
 	Emit: func(fact SecurityAlertFact) error {
 		return nil
@@ -384,9 +385,9 @@ logins := factoriat.MustNewFactoriat[LoginEvent, SuspiciousLoginFact](factoriat.
 	Evaluate: func(st *factoriat.State[LoginEvent], _ LoginEvent) (bool, error) {
 		return st.Count() >= 3, nil
 	},
-	Build: func(st *factoriat.State[LoginEvent]) (SuspiciousLoginFact, error) {
+	Build: func(st *factoriat.State[LoginEvent]) ([]SuspiciousLoginFact, error) {
 		event, _ := st.Last()
-		return SuspiciousLoginFact{UserID: event.UserID}, nil
+		return []SuspiciousLoginFact{{UserID: event.UserID}}, nil
 	},
 	Stabilize: func(st *factoriat.State[LoginEvent]) error {
 		st.Reset()

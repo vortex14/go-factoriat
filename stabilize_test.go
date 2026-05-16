@@ -14,9 +14,9 @@ func TestPush_StabilizeRunsAfterBuild(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(st *State[int]) (int, error) {
+		Build: func(st *State[int]) ([]int, error) {
 			built = st.Count()
-			return st.Count(), nil
+			return []int{st.Count()}, nil
 		},
 		Stabilize: func(st *State[int]) error {
 			st.ClearData()

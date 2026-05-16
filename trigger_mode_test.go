@@ -17,8 +17,8 @@ func TestPush_LevelModeEmitsWhileTriggerIsTrue(t *testing.T) {
 		Evaluate: func(st *State[int], _ int) (bool, error) {
 			return st.Count() >= 2, nil
 		},
-		Build: func(st *State[int]) (int, error) {
-			return st.Count(), nil
+		Build: func(st *State[int]) ([]int, error) {
+			return []int{st.Count()}, nil
 		},
 		Emit: func(_ int) error {
 			calls.Add(1)
@@ -48,8 +48,8 @@ func TestPush_EdgeModeEmitsOnlyOnFalseToTrueTransition(t *testing.T) {
 		Evaluate: func(st *State[int], _ int) (bool, error) {
 			return st.Count() >= 2, nil
 		},
-		Build: func(st *State[int]) (int, error) {
-			return st.Count(), nil
+		Build: func(st *State[int]) ([]int, error) {
+			return []int{st.Count()}, nil
 		},
 		Emit: func(_ int) error {
 			calls.Add(1)
@@ -78,8 +78,8 @@ func TestPush_EdgeModeCanEmitAgainAfterDefaultReset(t *testing.T) {
 		Evaluate: func(st *State[int], _ int) (bool, error) {
 			return st.Count() >= 2, nil
 		},
-		Build: func(st *State[int]) (int, error) {
-			return st.Count(), nil
+		Build: func(st *State[int]) ([]int, error) {
+			return []int{st.Count()}, nil
 		},
 		Emit: func(_ int) error {
 			calls.Add(1)

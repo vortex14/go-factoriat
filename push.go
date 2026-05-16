@@ -5,7 +5,7 @@ func (f *Factoriat[F, R]) Push(factor F) {
 }
 
 func (f *Factoriat[F, R]) PushResult(factor F) PushResult {
-	var fact R
+	var facts []R
 	var emit EmitCallback[R]
 	var result PushResult
 
@@ -23,49 +23,50 @@ func (f *Factoriat[F, R]) PushResult(factor F) PushResult {
 		state := record.State
 		triggered := record.Triggered
 
-		save := func(status PushStatus, emitted bool, err error) {
+		save := func(status PushStatus, emittedCount int, err error) {
 			if saveErr := f.stateRepository.SaveState(f.stateKey, StateRecord[F]{
 				State:     state,
 				Triggered: triggered,
 			}); saveErr != nil && err == nil {
 				status = PushStatusFailed
-				emitted = false
+				emittedCount = 0
 				err = saveErr
 			}
 
 			f.state = state.Snapshot()
 			f.triggered = triggered
 			result.Status = status
-			result.Emitted = emitted
+			result.Emitted = emittedCount > 0
+			result.EmittedCount = emittedCount
 			result.Err = err
 		}
 
 		// 1. захватываем входной фактор в состояние
 		if err := f.capture(&state, factor); err != nil {
-			save(PushStatusFailed, false, err)
+			save(PushStatusFailed, 0, err)
 			return
 		}
 
 		active, err := f.evaluate(&state, factor)
 		if err != nil {
-			save(PushStatusFailed, false, err)
+			save(PushStatusFailed, 0, err)
 			return
 		}
 		if !active {
 			triggered = false
-			save(PushStatusSkippedInactive, false, nil)
+			save(PushStatusSkippedInactive, 0, nil)
 			return
 		}
 
 		if f.triggerMode == TriggerModeEdge && triggered {
-			save(PushStatusSkippedAlreadyTriggered, false, nil)
+			save(PushStatusSkippedAlreadyTriggered, 0, nil)
 			return
 		}
 
 		snapshot := state.Snapshot()
-		fact, err = f.build(&snapshot)
+		facts, err = f.build(&snapshot)
 		if err != nil {
-			save(PushStatusFailed, false, err)
+			save(PushStatusFailed, 0, err)
 			return
 		}
 		emit = f.emit
@@ -73,7 +74,7 @@ func (f *Factoriat[F, R]) PushResult(factor F) PushResult {
 		// 4. стабилизируем состояние после порождения факта
 		if f.stabilize != nil {
 			if err := f.stabilize(&state); err != nil {
-				save(PushStatusFailed, false, err)
+				save(PushStatusFailed, 0, err)
 				return
 			}
 			triggered = false
@@ -85,7 +86,7 @@ func (f *Factoriat[F, R]) PushResult(factor F) PushResult {
 			triggered = true
 		}
 
-		save(PushStatusEmitted, true, nil)
+		save(PushStatusEmitted, len(facts), nil)
 	}()
 
 	if !result.Emitted {
@@ -93,10 +94,14 @@ func (f *Factoriat[F, R]) PushResult(factor F) PushResult {
 	}
 
 	// 5. выпускаем факт наружу после завершения внутреннего цикла
-	if err := emit(fact); err != nil {
-		return PushResult{
-			Status: PushStatusFailed,
-			Err:    err,
+	for i, fact := range facts {
+		if err := emit(fact); err != nil {
+			return PushResult{
+				Status:       PushStatusFailed,
+				Emitted:      i > 0,
+				EmittedCount: i,
+				Err:          err,
+			}
 		}
 	}
 

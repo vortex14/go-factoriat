@@ -13,10 +13,10 @@ func TestPush_BuildReceivesStateSnapshot(t *testing.T) {
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
-		Build: func(st *State[int]) (int, error) {
+		Build: func(st *State[int]) ([]int, error) {
 			st.ReplaceData([]int{100})
 			st.Set("sum", 100)
-			return st.Count(), nil
+			return []int{st.Count()}, nil
 		},
 		Emit: func(_ int) error { return nil },
 	})
