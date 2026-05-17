@@ -15,7 +15,8 @@
 //
 // Invariants:
 //
-//   - Capture, Evaluate, Build, and Emit are required by Config.Validate.
+//   - Build is always required by Config.Validate.
+//   - Capture, Evaluate, and Emit are required by Config.Validate only when Stateful is true.
 //   - Evaluate is the activation gate: it decides whether the current state is active.
 //   - Build receives an independent State snapshot and must not control live memory.
 //   - Stabilize receives live memory and is the only post-fact state transition hook.

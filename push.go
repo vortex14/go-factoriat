@@ -1,7 +1,27 @@
 package factoriat
 
+import "errors"
+
+var (
+	errCaptureRequired  = errors.New("factoriat push: capture is required")
+	errEvaluateRequired = errors.New("factoriat push: evaluate is required")
+	errEmitRequired     = errors.New("factoriat push: emit callback is required")
+)
+
 func (f *Factoriat[F, R]) Push(factor F) {
 	_ = f.PushResult(factor)
+}
+
+func (f *Factoriat[F, R]) Run(factor F) ([]R, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	state := State[F]{
+		data:    []F{factor},
+		counter: 1,
+	}
+
+	return f.build(&state)
 }
 
 func (f *Factoriat[F, R]) PushResult(factor F) PushResult {
@@ -12,6 +32,24 @@ func (f *Factoriat[F, R]) PushResult(factor F) PushResult {
 	func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+
+		if f.capture == nil {
+			result.Status = PushStatusFailed
+			result.Err = errCaptureRequired
+			return
+		}
+
+		if f.evaluate == nil {
+			result.Status = PushStatusFailed
+			result.Err = errEvaluateRequired
+			return
+		}
+
+		if f.emit == nil {
+			result.Status = PushStatusFailed
+			result.Err = errEmitRequired
+			return
+		}
 
 		record, err := f.stateRepository.LoadState(f.stateKey)
 		if err != nil {

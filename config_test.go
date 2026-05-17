@@ -4,7 +4,8 @@ import "testing"
 
 func validConfig() Config[int, int] {
 	return Config[int, int]{
-		Capture: func(_ *State[int], _ int) error { return nil },
+		Stateful: true,
+		Capture:  func(_ *State[int], _ int) error { return nil },
 		Evaluate: func(_ *State[int], _ int) (bool, error) {
 			return true, nil
 		},
@@ -15,7 +16,19 @@ func validConfig() Config[int, int] {
 	}
 }
 
-func TestConfig_ValidateRequiresCapture(t *testing.T) {
+func TestConfig_ValidateRequiresOnlyBuildWhenStateless(t *testing.T) {
+	cfg := Config[int, int]{
+		Build: func(_ *State[int]) ([]int, error) {
+			return []int{1}, nil
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected stateless config with only build to be valid, got %v", err)
+	}
+}
+
+func TestConfig_ValidateRequiresCaptureWhenStateful(t *testing.T) {
 	cfg := validConfig()
 	cfg.Capture = nil
 
@@ -24,7 +37,7 @@ func TestConfig_ValidateRequiresCapture(t *testing.T) {
 	}
 }
 
-func TestConfig_ValidateRequiresEvaluate(t *testing.T) {
+func TestConfig_ValidateRequiresEvaluateWhenStateful(t *testing.T) {
 	cfg := validConfig()
 	cfg.Evaluate = nil
 
@@ -42,7 +55,7 @@ func TestConfig_ValidateRequiresBuild(t *testing.T) {
 	}
 }
 
-func TestConfig_ValidateRequiresEmit(t *testing.T) {
+func TestConfig_ValidateRequiresEmitWhenStateful(t *testing.T) {
 	cfg := validConfig()
 	cfg.Emit = nil
 
@@ -53,6 +66,7 @@ func TestConfig_ValidateRequiresEmit(t *testing.T) {
 
 func TestConfig_ValidateAllowsErrorReturningLifecycle(t *testing.T) {
 	cfg := Config[int, int]{
+		Stateful: true,
 		Capture: func(_ *State[int], _ int) error {
 			return nil
 		},

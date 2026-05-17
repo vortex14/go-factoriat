@@ -22,20 +22,22 @@ type Config[F any, R any] struct {
 }
 
 func (cfg Config[F, R]) Validate() error {
-	if cfg.Capture == nil {
-		return fmt.Errorf("factoriat config: capture is required")
-	}
-
-	if cfg.Evaluate == nil {
-		return fmt.Errorf("factoriat config: evaluate is required")
-	}
-
 	if cfg.Build == nil {
 		return fmt.Errorf("factoriat config: build is required")
 	}
 
-	if cfg.Emit == nil {
-		return fmt.Errorf("factoriat config: emit callback is required")
+	if cfg.Stateful {
+		if cfg.Capture == nil {
+			return fmt.Errorf("factoriat config: capture is required")
+		}
+
+		if cfg.Evaluate == nil {
+			return fmt.Errorf("factoriat config: evaluate is required")
+		}
+
+		if cfg.Emit == nil {
+			return fmt.Errorf("factoriat config: emit callback is required")
+		}
 	}
 
 	if cfg.StateRepository != nil && cfg.StateKey == "" {

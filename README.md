@@ -32,6 +32,8 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 
 Каждый lifecycle hook возвращает ошибку. Если любой шаг возвращает `error`, lifecycle останавливается и `PushResult` возвращает `PushStatusFailed` с заполненным `Err`.
 
+Для синхронного stateless-сценария есть `Run(factor)`: он не проходит полный lifecycle, не читает и не сохраняет live-state, не вызывает `Capture`, `Evaluate`, `Stabilize` и `Emit`. `Run` передаёт один входной фактор в `Build` через временный `State` и сразу возвращает `[]R`.
+
 ## Public API
 
 Публичная поверхность `github.com/vortex14/go-factoriat` делится на несколько небольших групп.
@@ -43,7 +45,7 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 - `MustNewFactoriat(cfg)` — создаёт факториат или паникует, если конфигурация неполная.
 - `Config.Validate()` — проверяет, что обязательные стадии заданы.
 
-`Capture`, `Evaluate`, `Build` и `Emit` обязательны. `Stabilize` опционален: если он не задан и `Stateful == false`, память сбрасывается автоматически после построения факта.
+`Build` обязателен всегда. Если `Stateful == true`, дополнительно обязательны `Capture`, `Evaluate` и `Emit`, потому что такой факториат поддерживает полный `Push`-lifecycle. Для stateless-сценария с `Run` можно задать только `Build`. `Stabilize` опционален: если он не задан и `Stateful == false`, память сбрасывается автоматически после построения факта в `Push`.
 
 ### State Persistence
 
@@ -98,6 +100,7 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 
 - `Push(factor)` — обработать фактор без анализа результата.
 - `PushResult(factor)` — обработать фактор и вернуть runtime-исход.
+- `Run(factor)` — синхронно построить факты из одного фактора без live-state и emit callback.
 - `PushResult.Status` — статус обработки.
 - `PushResult.Emitted` — был ли выпущен хотя бы один факт.
 - `PushResult.EmittedCount` — сколько фактов было успешно выпущено.
@@ -109,6 +112,8 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 - `PushStatusSkippedAlreadyTriggered`
 - `PushStatusEmitted`
 - `PushStatusFailed`
+
+`Run` возвращает `([]R, error)` напрямую. Он создаёт одноразовый `State[F]` с текущим фактором, вызывает только `Build` и возвращает ошибку `Build`, если она была. `Run` не использует `StateRepository`, `TriggerMode`, `Stateful`, `Stabilize` и `Emit`.
 
 ### Trigger Mode
 
@@ -129,7 +134,7 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 Эти правила считаются контрактом первой стабильной формы `go-factoriat`. Их изменение должно рассматриваться как breaking change.
 
 - Lifecycle остаётся линейным: `Capture -> Evaluate -> Build -> Stabilize -> Emit`.
-- `Capture`, `Evaluate`, `Build` и `Emit` обязательны при создании факториата.
+- `Build` обязателен при создании факториата; `Capture`, `Evaluate` и `Emit` обязательны только при `Stateful == true`.
 - Каждый lifecycle hook возвращает `error`; первая ошибка останавливает обработку и возвращается через `PushResult.Err`.
 - `Build` получает независимый `State` snapshot, строит `[]R` и не управляет живой памятью.
 - `Stabilize` получает живую память и является единственной пост-фактной стадией изменения состояния.
@@ -139,6 +144,7 @@ Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
 - Доменный meta-контекст должен использовать `MetaKey[T]`, чтобы ключ и тип значения были связаны.
 - `TriggerMode` не заменяет `Evaluate`; он только определяет, считать активное состояние уровнем или новым импульсом.
 - `PushResult` описывает runtime-исход обработки, а ошибки сборки конфигурации остаются ответственностью `Config.Validate`.
+- `Run` является отдельным stateless-путём: он не участвует в lifecycle `PushResult`, не меняет live-state и не выпускает факты через `Emit`.
 
 ## Ментальная модель
 
