@@ -1,6 +1,821 @@
 # go-factoriat
 
-Factoriat — информационный транзистор: он принимает входной фактор, накапливает его в живой памяти, оценивает затвор активации и, при срабатывании, выпускает факт.
+Factoriat — lightweight typed decision engine для Go.
+
+Определение:
+
+> Factoriat принимает снимок доменного состояния (`Factor`), прогоняет его через именованные предикаты и правила, возвращает типизированные факты-решения (`Facts`) и оставляет исполнение side effects внешнему слою.
+
+Главная формула:
+
+```text
+Factor -> Predicates -> Rules -> Facts -> Apply
+```
+
+Это stateless-формула. Она подходит, когда решение можно принять по одному текущему снимку состояния. На вход приходит `Factor`, предикаты отвечают на вопрос “что сейчас истинно?”, правила собирают из этого facts, а внешний слой применяет side effects. Factoriat ничего не помнит между вызовами.
+
+Например: можно ли применить купон, какой способ доставки выбрать, нужно ли отправить платёж на ручную проверку.
+
+Для stateful-сценариев одного снимка уже недостаточно. Нужно учитывать, что factoriat видел раньше: какие факты уже были построены, какие решения должны стабилизироваться, что нельзя эмитить повторно, пока состояние не изменилось. Поэтому полный lifecycle выглядит так:
+
+```text
+Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit
+```
+
+Здесь `Capture` сохраняет входной снимок или его признаки, `Evaluate` сравнивает текущее состояние с накопленным контекстом, `Build` строит возможные facts, `Stabilize` убирает шум, дубли или нестабильные переходы, а `Emit` отдаёт только те facts, которые действительно должны выйти наружу.
+
+Коротко:
+
+- `Stateless` — решение по текущему `Factor`, без памяти между вызовами.
+- `Stateful` — решение по текущему `Factor` плюс внутренний контекст прошлых вычислений.
+
+## Из Каких Паттернов Собирается
+
+Factoriat объединяет несколько известных подходов:
+
+- **Specification / Predicate Pattern** — сложные условия получают имена и становятся доменным языком.
+- **Rules Engine** — входные данные проходят через правила и дают результат.
+- **Decision Table** — rules builder читается как таблица решений.
+- **Domain Events / Command Facts** — результат выражен типизированными facts.
+- **Separation of Decision and Execution** — факториат принимает решение, внешний слой его применяет.
+
+## Принцип Мышления
+
+```mermaid
+flowchart LR
+    A["Собрать Factor<br/>что известно сейчас"] --> B["Назвать Predicates<br/>какие условия истинны"]
+    B --> C["Построить Rules<br/>какие решения следуют"]
+    C --> D["Вернуть Facts<br/>что должно произойти"]
+    D --> E["Apply снаружи<br/>side effects вне factoriat"]
+
+    E -. "новые события могут стать новыми factors" .-> A
+```
+
+Factoriat не должен писать в БД, создавать timers, брать locks, вызывать network или мутировать application state. Он только превращает состояние в факты.
+
+## Алгоритм Применения
+
+```mermaid
+flowchart TB
+    A["Разрозненные условия<br/>if / else / nested checks"] --> B["Выделить входные признаки<br/>Factor"]
+    B --> C["Назвать простые условия<br/>atomic predicates"]
+    C --> D["Собрать доменные условия<br/>composed predicates"]
+    D --> E["Описать правила<br/>predicate -> Fact"]
+    E --> F["Вернуть типизированные Facts<br/>без side effects"]
+    F --> G["Применить Facts снаружи<br/>DB / timers / locks / domain mutation"]
+
+    G -. "новое состояние или событие" .-> B
+```
+
+Практический ход такой:
+
+1. Найти большой блок условий.
+2. Выписать данные, от которых зависит решение, в `Factor`.
+3. Назвать одиночные проверки предикатами.
+4. Собрать из них композиционные доменные предикаты.
+5. В `Build` оставить только правила вида `predicate -> Fact`.
+6. Вернуть факты без side effects.
+7. Применить факты во внешнем слое, где доступны БД, timers, locks и domain mutation.
+
+## Stateless-Боли, Которые Это Закрывает
+
+Эти примеры описывают ситуации, где один входной `Factor` уже содержит достаточно контекста для решения. Здесь не нужно накапливать память между вызовами: достаточно превратить текущий снимок состояния в набор typed facts.
+
+### 1. Банковская Логика: Решение Размазано По Проверкам
+
+Например, нужно понять, можно ли подтвердить платёж, отправить его на manual review или отклонить:
+
+```go
+if account != nil &&
+	account.Active &&
+	!account.Blocked &&
+	payment.Amount <= account.Limit &&
+	kyc.Passed &&
+	!fraud.HighRisk &&
+	currency.Allowed(payment.Currency) {
+	// approve payment
+}
+```
+
+Проблема: условия быстро растут, часть проверок начинает повторяться в разных сервисах, а изменение одного банковского правила требует искать его по коду.
+
+Factoriat помогает превратить это в набор явных решений:
+
+```text
+PaymentShouldBeApproved
+PaymentShouldGoToManualReview
+PaymentShouldBeRejected
+```
+
+Применим алгоритм к этому примеру.
+
+**Шаг 1. Найти большой блок условий**
+
+Было:
+
+```go
+if account != nil &&
+	account.Active &&
+	!account.Blocked &&
+	payment.Amount <= account.Limit &&
+	kyc.Passed &&
+	!fraud.HighRisk &&
+	currency.Allowed(payment.Currency) {
+	// approve payment
+}
+```
+
+Здесь одновременно проверяются account, лимиты, KYC, fraud и валюта. Это уже не одно условие, а набор доменных правил.
+
+**Шаг 2. Выписать входные признаки в Factor**
+
+```go
+type PaymentFactor struct {
+	AccountFound   bool
+	AccountActive  bool
+	AccountBlocked bool
+	AccountLimit   money.Amount
+
+	PaymentAmount   money.Amount
+	PaymentCurrency currency.Code
+
+	KYCPassed bool
+	HighRisk  bool
+
+	CurrencyAllowed bool
+}
+```
+
+`Factor` не содержит `ShouldApprove`. Он содержит только признаки, из которых решение будет выведено.
+
+**Шаг 3. Назвать одиночные проверки предикатами**
+
+```go
+func (f PaymentFactor) accountAvailable() bool {
+	return f.AccountFound && f.AccountActive && !f.AccountBlocked
+}
+
+func (f PaymentFactor) withinLimit() bool {
+	return f.PaymentAmount.LessThanOrEqual(f.AccountLimit)
+}
+
+func (f PaymentFactor) compliancePassed() bool {
+	return f.KYCPassed && !f.HighRisk
+}
+```
+
+**Шаг 4. Собрать композиционные доменные предикаты**
+
+```go
+func (f PaymentFactor) canApprovePayment() bool {
+	return f.accountAvailable() &&
+		f.withinLimit() &&
+		f.compliancePassed() &&
+		f.CurrencyAllowed
+}
+
+func (f PaymentFactor) requiresManualReview() bool {
+	return f.accountAvailable() && (f.HighRisk || !f.KYCPassed)
+}
+```
+
+Теперь сложность условий осталась, но она получила доменные имена. Композиционные предикаты могут переиспользовать более простые предикаты, чтобы не дублировать проверки.
+
+**Шаг 5. В `Build` оставить правила `predicate -> Fact`**
+
+```go
+func buildPaymentFacts(f PaymentFactor) []Fact {
+	if f.canApprovePayment() {
+		return []Fact{PaymentShouldBeApproved{}}
+	}
+
+	if f.requiresManualReview() {
+		return []Fact{PaymentShouldGoToManualReview{}}
+	}
+
+	return []Fact{PaymentShouldBeRejected{}}
+}
+```
+
+`Build` читается как таблица решений: approve, manual review, reject.
+
+**Шаг 6. Вернуть facts без side effects**
+
+```go
+type PaymentShouldBeApproved struct{}
+type PaymentShouldGoToManualReview struct{}
+type PaymentShouldBeRejected struct{}
+```
+
+Факты не списывают деньги, не пишут в ledger и не отправляют события. Они только описывают решение.
+
+**Шаг 7. Применить facts снаружи**
+
+```go
+for _, fact := range facts {
+	switch fact.(type) {
+	case PaymentShouldBeApproved:
+		ledger.Reserve(payment.ID)
+		events.PublishPaymentApproved(payment.ID)
+
+	case PaymentShouldGoToManualReview:
+		reviewQueue.Enqueue(payment.ID)
+
+	case PaymentShouldBeRejected:
+		events.PublishPaymentRejected(payment.ID)
+	}
+}
+```
+
+Так банковская логика становится разделённой:
+
+```text
+PaymentFactor -> predicates -> payment facts -> external side effects
+```
+
+### 2. Логистика: Много Исключений В Маршрутизации
+
+Например, нужно выбрать способ доставки:
+
+```go
+if order.Weight < 20 &&
+	warehouse.HasStock &&
+	route.Available &&
+	!address.RemoteArea &&
+	!carrier.OnStrike &&
+	weather.IsSafe {
+	// ship by standard carrier
+}
+```
+
+Проблема: логистика живёт исключениями. Вес, склад, регион, SLA, погода, перевозчик и таможня создают дерево условий, которое сложно читать и тестировать.
+
+Factoriat позволяет описывать решения как факты:
+
+```text
+ShipmentShouldUseStandardCarrier
+ShipmentShouldUseExpressCarrier
+ShipmentShouldWaitForWarehouse
+ShipmentShouldRequireManualRouting
+```
+
+Применим тот же алгоритм к логистике.
+
+**Шаг 1. Найти большой блок условий**
+
+Было:
+
+```go
+if order.Weight < 20 &&
+	warehouse.HasStock &&
+	route.Available &&
+	!address.RemoteArea &&
+	!carrier.OnStrike &&
+	weather.IsSafe {
+	// ship by standard carrier
+}
+```
+
+Здесь в одном условии смешались признаки заказа, склада, маршрута, адреса, перевозчика и погоды. Когда появится новый SLA, ручной регион или исключение по таможне, условие начнёт расти в разные стороны.
+
+**Шаг 2. Выписать входные признаки в Factor**
+
+```go
+type ShipmentFactor struct {
+	OrderWeight       decimal.Decimal
+	MaxStandardWeight decimal.Decimal
+
+	WarehouseHasStock bool
+	RouteAvailable    bool
+	RemoteArea        bool
+
+	CarrierOnStrike bool
+	WeatherSafe     bool
+	CustomsRequired bool
+
+	ExpressAllowed bool
+	SLARequiresFast bool
+}
+```
+
+`ShipmentFactor` не выбирает перевозчика сам. Он только фиксирует, что известно на момент принятия решения.
+
+**Шаг 3. Назвать одиночные проверки предикатами**
+
+```go
+func (f ShipmentFactor) weightFitsStandard() bool {
+	return f.OrderWeight.LessThanOrEqual(f.MaxStandardWeight)
+}
+
+func (f ShipmentFactor) stockAvailable() bool {
+	return f.WarehouseHasStock
+}
+
+func (f ShipmentFactor) routeUsable() bool {
+	return f.RouteAvailable && !f.RemoteArea
+}
+
+func (f ShipmentFactor) carrierAvailable() bool {
+	return !f.CarrierOnStrike
+}
+```
+
+Вместо повторения `warehouse.HasStock`, `!carrier.OnStrike` и `route.Available` по разным сервисам появляются маленькие условия с доменными именами.
+
+**Шаг 4. Собрать композиционные доменные предикаты**
+
+```go
+func (f ShipmentFactor) shipmentCanStart() bool {
+	return f.stockAvailable() &&
+		f.RouteAvailable &&
+		f.carrierAvailable()
+}
+
+func (f ShipmentFactor) regularConditionsSafe() bool {
+	return f.WeatherSafe && !f.CustomsRequired
+}
+
+func (f ShipmentFactor) expressNeeded() bool {
+	return f.SLARequiresFast || f.RemoteArea
+}
+
+func (f ShipmentFactor) canUseStandardCarrier() bool {
+	return f.shipmentCanStart() &&
+		f.weightFitsStandard() &&
+		f.routeUsable() &&
+		f.regularConditionsSafe()
+}
+
+func (f ShipmentFactor) canUseExpressCarrier() bool {
+	return f.shipmentCanStart() &&
+		f.ExpressAllowed &&
+		f.expressNeeded()
+}
+
+func (f ShipmentFactor) needsManualRouting() bool {
+	return f.CustomsRequired ||
+		!f.RouteAvailable ||
+		!f.WeatherSafe ||
+		f.CarrierOnStrike
+}
+```
+
+Здесь хорошо видно отличие от большого `if`: сложные условия не исчезли, но они больше не безымянные. Общие композиционные предикаты вроде `shipmentCanStart`, `regularConditionsSafe` и `expressNeeded` убирают повторения из конкретных решений. Их можно обсуждать с бизнесом как правила маршрутизации.
+
+**Шаг 5. В `Build` оставить правила `predicate -> Fact`**
+
+```go
+func buildShipmentFacts(f ShipmentFactor) []Fact {
+	if !f.stockAvailable() {
+		return []Fact{ShipmentShouldWaitForWarehouse{}}
+	}
+
+	if f.canUseStandardCarrier() {
+		return []Fact{ShipmentShouldUseStandardCarrier{}}
+	}
+
+	if f.canUseExpressCarrier() {
+		return []Fact{ShipmentShouldUseExpressCarrier{}}
+	}
+
+	if f.needsManualRouting() {
+		return []Fact{ShipmentShouldRequireManualRouting{}}
+	}
+
+	return []Fact{ShipmentShouldRequireManualRouting{}}
+}
+```
+
+`Build` становится списком решений в порядке приоритета: сначала склад, потом стандартная доставка, потом express, потом ручная маршрутизация.
+
+**Шаг 6. Вернуть facts без side effects**
+
+```go
+type ShipmentShouldUseStandardCarrier struct{}
+type ShipmentShouldUseExpressCarrier struct{}
+type ShipmentShouldWaitForWarehouse struct{}
+type ShipmentShouldRequireManualRouting struct{}
+```
+
+Факты не бронируют перевозчика, не меняют заказ и не отправляют уведомления. Они только говорят, какое решение принято.
+
+**Шаг 7. Применить facts снаружи**
+
+```go
+for _, fact := range facts {
+	switch fact.(type) {
+	case ShipmentShouldUseStandardCarrier:
+		carrier.BookStandard(order.ID)
+
+	case ShipmentShouldUseExpressCarrier:
+		carrier.BookExpress(order.ID)
+
+	case ShipmentShouldWaitForWarehouse:
+		warehouseQueue.Enqueue(order.ID)
+
+	case ShipmentShouldRequireManualRouting:
+		routingDesk.CreateTask(order.ID)
+	}
+}
+```
+
+Так логистика превращается из дерева исключений в читаемую цепочку:
+
+```text
+ShipmentFactor -> predicates -> shipment facts -> external side effects
+```
+
+### 3. Игровая Логика: Состояние И Правила Переплетаются
+
+Например, в игре нужно понять, что делать с игроком после таймера:
+
+```go
+if player.InHand &&
+	!player.Folded &&
+	!player.AllIn &&
+	table.Street != SHOWDOWN &&
+	timer.Expired &&
+	player.CanAct {
+	// auto fold or auto check
+}
+```
+
+Проблема: правила зависят от текущей фазы игры, состояния игрока, таймеров, ставок и исключений. Если смешать это с изменением стола, код становится хрупким.
+
+Factoriat помогает отделить решение от исполнения:
+
+```text
+PlayerShouldAutoFold
+PlayerShouldAutoCheck
+HandShouldMoveToShowdown
+PlayerShouldSitOut
+```
+
+Применим алгоритм к игровой логике.
+
+**Шаг 1. Найти большой блок условий**
+
+Было:
+
+```go
+if player.InHand &&
+	!player.Folded &&
+	!player.AllIn &&
+	table.Street != SHOWDOWN &&
+	timer.Expired &&
+	player.CanAct {
+	// auto fold or auto check
+}
+```
+
+Здесь одновременно проверяются состояние игрока, состояние раздачи, таймер и право действия. Если прямо внутри этого блока менять стол, карты, банк или очередь хода, решение и side effects станут одним комом.
+
+**Шаг 2. Выписать входные признаки в Factor**
+
+```go
+type PlayerTimerFactor struct {
+	TableID  table.ID
+	PlayerID player.ID
+
+	InHand bool
+	Folded bool
+	AllIn  bool
+
+	Street      table.Street
+	TimerExpired bool
+	PlayerCanAct bool
+
+	ToCall       chips.Amount
+	ActivePlayers int
+}
+```
+
+`PlayerTimerFactor` не двигает игру дальше. Он только описывает текущий снимок: кто игрок, где находится раздача, истёк ли таймер и есть ли ставка к коллу.
+
+**Шаг 3. Назвать одиночные проверки предикатами**
+
+```go
+func (f PlayerTimerFactor) playerInDecision() bool {
+	return f.InHand && !f.Folded && !f.AllIn
+}
+
+func (f PlayerTimerFactor) handRunning() bool {
+	return f.Street != table.Showdown
+}
+
+func (f PlayerTimerFactor) actionTimedOut() bool {
+	return f.TimerExpired && f.PlayerCanAct
+}
+
+func (f PlayerTimerFactor) hasNothingToCall() bool {
+	return f.ToCall.IsZero()
+}
+```
+
+Мелкие предикаты убирают шум из правил. Вместо `!player.Folded && !player.AllIn` появляется понятное доменное имя `playerInDecision`.
+
+**Шаг 4. Собрать композиционные доменные предикаты**
+
+```go
+func (f PlayerTimerFactor) canApplyTimeoutAction() bool {
+	return f.playerInDecision() &&
+		f.handRunning() &&
+		f.actionTimedOut()
+}
+
+func (f PlayerTimerFactor) shouldAutoCheck() bool {
+	return f.canApplyTimeoutAction() &&
+		f.hasNothingToCall()
+}
+
+func (f PlayerTimerFactor) shouldAutoFold() bool {
+	return f.canApplyTimeoutAction() &&
+		!f.hasNothingToCall()
+}
+
+func (f PlayerTimerFactor) shouldMoveToShowdownAfterFold() bool {
+	return f.shouldAutoFold() && f.ActivePlayers <= 2
+}
+```
+
+Здесь видно, что “таймер истёк” сам по себе ещё не решение. Решение появляется только после композиции: игрок действительно в раздаче, раздача ещё идёт, игрок может действовать, и понятно, есть ли ставка к коллу.
+
+**Шаг 5. В `Build` оставить правила `predicate -> Fact`**
+
+```go
+func buildPlayerTimerFacts(f PlayerTimerFactor) []Fact {
+	if !f.canApplyTimeoutAction() {
+		return nil
+	}
+
+	if f.shouldAutoCheck() {
+		return []Fact{PlayerShouldAutoCheck{}}
+	}
+
+	if f.shouldMoveToShowdownAfterFold() {
+		return []Fact{
+			PlayerShouldAutoFold{},
+			HandShouldMoveToShowdown{},
+			PlayerShouldSitOut{},
+		}
+	}
+
+	if f.shouldAutoFold() {
+		return []Fact{
+			PlayerShouldAutoFold{},
+			PlayerShouldSitOut{},
+		}
+	}
+
+	return nil
+}
+```
+
+`Build` больше не решает, как именно поменять стол. Он только возвращает набор фактов, которые описывают доменное решение.
+
+**Шаг 6. Вернуть facts без side effects**
+
+```go
+type PlayerShouldAutoFold struct {
+	TableID  table.ID
+	PlayerID player.ID
+}
+
+type PlayerShouldAutoCheck struct {
+	TableID  table.ID
+	PlayerID player.ID
+}
+
+type HandShouldMoveToShowdown struct {
+	TableID table.ID
+}
+
+type PlayerShouldSitOut struct {
+	TableID  table.ID
+	PlayerID player.ID
+}
+```
+
+Факты не вызывают `Fold`, не двигают street и не меняют seat state. Они только фиксируют, что должно быть сделано внешним слоем.
+
+**Шаг 7. Применить facts снаружи**
+
+```go
+for _, fact := range facts {
+	switch fact := fact.(type) {
+	case PlayerShouldAutoCheck:
+		tableService.AutoCheck(fact.TableID, fact.PlayerID)
+
+	case PlayerShouldAutoFold:
+		tableService.AutoFold(fact.TableID, fact.PlayerID)
+
+	case HandShouldMoveToShowdown:
+		tableService.MoveToShowdown(fact.TableID)
+
+	case PlayerShouldSitOut:
+		tableService.MarkSitOut(fact.TableID, fact.PlayerID)
+	}
+}
+```
+
+Так игровая логика перестаёт быть смесью проверок и мутаций:
+
+```text
+PlayerTimerFactor -> predicates -> player timer facts -> external side effects
+```
+
+### 4. Маркетплейс: Акции, Продавцы И Риски Создают Комбинаторику
+
+Например, нужно решить, можно ли применить скидку:
+
+```go
+if product.Active &&
+	seller.Verified &&
+	buyer.NotAbusive &&
+	coupon.Valid &&
+	cart.Total >= coupon.MinTotal &&
+	!category.Excluded &&
+	region.Allowed &&
+	!promotion.Conflict {
+	// apply coupon
+}
+```
+
+Проблема: маркетплейс быстро обрастает правилами продавцов, регионов, категорий, промоакций, лимитов и антифрода. Условия начинают конфликтовать друг с другом.
+
+Factoriat делает результат явным:
+
+```text
+CouponShouldBeApplied
+CouponShouldBeRejected
+PromotionConflictDetected
+OrderShouldRequireRiskReview
+```
+
+Применим алгоритм к маркетплейсу.
+
+**Шаг 1. Найти большой блок условий**
+
+Было:
+
+```go
+if product.Active &&
+	seller.Verified &&
+	buyer.NotAbusive &&
+	coupon.Valid &&
+	cart.Total >= coupon.MinTotal &&
+	!category.Excluded &&
+	region.Allowed &&
+	!promotion.Conflict {
+	// apply coupon
+}
+```
+
+Здесь в одном условии смешались товар, продавец, покупатель, купон, корзина, категория, регион и промоакции. При добавлении нового правила легко сломать старую скидку или разрешить купон там, где его применять нельзя.
+
+**Шаг 2. Выписать входные признаки в Factor**
+
+```go
+type CouponFactor struct {
+	ProductActive bool
+	CategoryExcluded bool
+
+	SellerVerified bool
+	BuyerAbusive   bool
+	BuyerHighRisk  bool
+
+	CouponValid bool
+	CartTotal   money.Amount
+	MinTotal    money.Amount
+
+	RegionAllowed     bool
+	PromotionConflict bool
+}
+```
+
+`CouponFactor` не применяет скидку и не меняет заказ. Он только собирает признаки, которые нужны для решения.
+
+**Шаг 3. Назвать одиночные проверки предикатами**
+
+```go
+func (f CouponFactor) productEligible() bool {
+	return f.ProductActive && !f.CategoryExcluded
+}
+
+func (f CouponFactor) sellerEligible() bool {
+	return f.SellerVerified
+}
+
+func (f CouponFactor) buyerAllowed() bool {
+	return !f.BuyerAbusive
+}
+
+func (f CouponFactor) couponAvailable() bool {
+	return f.CouponValid
+}
+
+func (f CouponFactor) cartMeetsMinimum() bool {
+	return f.CartTotal.GreaterThanOrEqual(f.MinTotal)
+}
+```
+
+Атомарные предикаты фиксируют маленькие бизнес-смыслы. Например, `productEligible` уже лучше, чем повторять `product.Active && !category.Excluded` в разных местах checkout.
+
+**Шаг 4. Собрать композиционные доменные предикаты**
+
+```go
+func (f CouponFactor) marketplaceAllowsCoupon() bool {
+	return f.productEligible() &&
+		f.sellerEligible() &&
+		f.RegionAllowed
+}
+
+func (f CouponFactor) customerCanUseCoupon() bool {
+	return f.buyerAllowed() &&
+		!f.BuyerHighRisk
+}
+
+func (f CouponFactor) couponConditionsMet() bool {
+	return f.couponAvailable() &&
+		f.cartMeetsMinimum()
+}
+
+func (f CouponFactor) canApplyCoupon() bool {
+	return f.marketplaceAllowsCoupon() &&
+		f.customerCanUseCoupon() &&
+		f.couponConditionsMet() &&
+		!f.PromotionConflict
+}
+
+func (f CouponFactor) needsRiskReview() bool {
+	return f.BuyerHighRisk && f.couponAvailable()
+}
+
+func (f CouponFactor) hasPromotionConflict() bool {
+	return f.PromotionConflict
+}
+```
+
+Теперь правила читаются слоями: сначала площадка разрешает купон, затем покупатель проходит ограничения, затем сам купон выполняет свои условия. Это снижает комбинаторику, потому что каждое большое решение собирается из понятных блоков.
+
+**Шаг 5. В `Build` оставить правила `predicate -> Fact`**
+
+```go
+func buildCouponFacts(f CouponFactor) []Fact {
+	if f.hasPromotionConflict() {
+		return []Fact{PromotionConflictDetected{}}
+	}
+
+	if f.needsRiskReview() {
+		return []Fact{OrderShouldRequireRiskReview{}}
+	}
+
+	if f.canApplyCoupon() {
+		return []Fact{CouponShouldBeApplied{}}
+	}
+
+	return []Fact{CouponShouldBeRejected{}}
+}
+```
+
+`Build` показывает порядок приоритетов: сначала конфликт промоакций, потом риск, потом применение купона, иначе отказ.
+
+**Шаг 6. Вернуть facts без side effects**
+
+```go
+type CouponShouldBeApplied struct{}
+type CouponShouldBeRejected struct{}
+type PromotionConflictDetected struct{}
+type OrderShouldRequireRiskReview struct{}
+```
+
+Факты не пересчитывают корзину, не списывают лимит купона и не создают тикет риска. Они только описывают принятое решение.
+
+**Шаг 7. Применить facts снаружи**
+
+```go
+for _, fact := range facts {
+	switch fact.(type) {
+	case CouponShouldBeApplied:
+		cart.ApplyCoupon(order.ID, coupon.ID)
+
+	case CouponShouldBeRejected:
+		events.PublishCouponRejected(order.ID, coupon.ID)
+
+	case PromotionConflictDetected:
+		promotionService.MarkConflict(order.ID)
+
+	case OrderShouldRequireRiskReview:
+		riskQueue.Enqueue(order.ID)
+	}
+}
+```
+
+Так маркетплейс-логика перестаёт быть набором конфликтующих условий:
+
+```text
+CouponFactor -> predicates -> coupon facts -> external side effects
+```
 
 ## Установка
 
@@ -12,524 +827,17 @@ go get github.com/vortex14/go-factoriat
 import factoriat "github.com/vortex14/go-factoriat"
 ```
 
-## Словарь паттерна
-
-- `factor F` — входной фактор, то есть один сигнал, который может изменить память факториата.
-- `State[F]` — живая память факториата; она накапливает факторы, счётчики и доменный контекст между вызовами.
-- `snapshot` — независимый снимок памяти для `Build`; его можно читать и даже случайно менять без влияния на live-state.
-- `Evaluate` — затвор активации; он не создаёт факт, а только отвечает, активен ли факториат сейчас.
-- `fact R` — выходной факт, собранный из снимка памяти.
-- `Stabilize` — переход живой памяти в следующее устойчивое состояние после построения факта.
-- `Emit` — внешний выпуск факта; этот шаг находится за пределами mutex и может породить новые входные факторы.
-
-## Главная идея
-
-```text
-Factor -> Capture -> Evaluate -> Build -> Stabilize -> Emit -> Fact
-```
-
-`Build` получает независимый снимок памяти, поэтому не может случайно изменить live-state. `Stabilize` получает живую память и отвечает за пост-фактное состояние. `Emit` вызывается вне mutex, поэтому callback может безопасно отправлять новые факторы.
-
-Каждый lifecycle hook возвращает ошибку. Если любой шаг возвращает `error`, lifecycle останавливается и `PushResult` возвращает `PushStatusFailed` с заполненным `Err`.
-
-Для синхронного stateless-сценария есть `Run(factor)`: он не проходит полный lifecycle, не читает и не сохраняет live-state, не вызывает `Capture`, `Evaluate`, `Stabilize` и `Emit`. `Run` передаёт один входной фактор в `Build` через временный `State` и сразу возвращает `[]R`.
-
-## Public API
-
-Публичная поверхность `github.com/vortex14/go-factoriat` делится на несколько небольших групп.
-
-### Конструирование
-
-- `Config[F,R]` — декларация жизненного цикла факториата.
-- `NewFactoriat(cfg)` — создаёт факториат и возвращает ошибку валидации.
-- `MustNewFactoriat(cfg)` — создаёт факториат или паникует, если конфигурация неполная.
-- `Config.Validate()` — проверяет, что обязательные стадии заданы.
-
-`Build` обязателен всегда. Если `Stateful == true`, дополнительно обязательны `Capture`, `Evaluate` и `Emit`, потому что такой факториат поддерживает полный `Push`-lifecycle. Для stateless-сценария с `Run` можно задать только `Build`. `Stabilize` опционален: если он не задан и `Stateful == false`, память сбрасывается автоматически после построения факта в `Push`.
-
-### State Persistence
-
-- `StateRepository[F]` — интерфейс хранения runtime-состояния факториата.
-- `StateRecord[F]` — persistable запись: `State` плюс `Triggered`.
-- `InMemoryStateRepository[F]` — in-memory реализация репозитория.
-- `NewInMemoryStateRepository[F]()` — создать in-memory репозиторий.
-- `Config.StateRepository` — подключить внешний репозиторий состояния.
-- `Config.StateKey` — ключ состояния внутри репозитория.
-
-Если `StateRepository` не задан, факториат создаёт собственный in-memory репозиторий. Если репозиторий задан явно, `StateKey` обязателен. `StateRecord` хранит `Triggered`, потому что `TriggerModeEdge` должен работать одинаково в памяти процесса, PostgreSQL, Redis или любом другом адаптере.
-
-### Lifecycle Rules
-
-- `CaptureRule[F]` — записывает входной фактор в живую память.
-- `EvaluateRule[F]` — решает, активен ли факториат.
-- `BuildRule[F,R]` — строит один или несколько фактов из независимого снимка памяти.
-- `StabilizeRule[F]` — переводит живую память в следующее устойчивое состояние.
-- `EmitCallback[R]` — выпускает факт во внешний мир после unlock.
-
-Это единственный публичный lifecycle-словарь: `Capture -> Evaluate -> Build -> Stabilize -> Emit`.
-
-### State Memory
-
-- `State[F]` — управляемая живая память факториата.
-- `Append(factor)` — добавить фактор в буфер.
-- `Count()` — получить размер буфера.
-- `Last()` — получить последний фактор.
-- `DataSnapshot()` — получить копию буфера факторов.
-- `ReplaceData(data)` — заменить буфер с синхронизацией счётчика.
-- `MetaSnapshot()` — получить копию meta-памяти.
-- `ReplaceMeta(meta)` — заменить meta-память копией переданной map.
-- `TrimLast(n)` — оставить последние `n` факторов.
-- `ClearData()` — очистить буфер факторов, не трогая meta-память.
-- `Reset()` — вернуть состояние к пустому устойчивому виду.
-- `Snapshot()` — получить независимый снимок всего состояния.
-
-Поля памяти закрыты намеренно: пользователь управляет состоянием только через методы, чтобы буфер и счётчики не расходились. Методы `DataSnapshot`, `MetaSnapshot`, `ReplaceData` и `ReplaceMeta` нужны в том числе внешним репозиториям, которые сериализуют состояние в PostgreSQL, Redis или другое хранилище.
-
-### Meta Memory
-
-- `MetaKey[T]` — типизированный ключ meta-памяти.
-- `NewMetaKey[T](name)` — создать ключ.
-- `SetMeta(st, key, value)` — записать значение по типизированному ключу.
-- `GetMeta(st, key)` — прочитать значение по типизированному ключу.
-- `MetaOr(st, key, fallback)` — прочитать значение или fallback.
-- `IncMetaInt(st, key, delta)` — увеличить `int`-значение по ключу.
-
-Низкоуровневые `State.Set` и `State.Get` остаются для редких случаев, но канонический путь для доменного контекста — `MetaKey`.
-
-### Runtime Result
-
-- `Push(factor)` — обработать фактор без анализа результата.
-- `PushResult(factor)` — обработать фактор и вернуть runtime-исход.
-- `Run(factor)` — синхронно построить факты из одного фактора без live-state и emit callback.
-- `PushResult.Status` — статус обработки.
-- `PushResult.Emitted` — был ли выпущен хотя бы один факт.
-- `PushResult.EmittedCount` — сколько фактов было успешно выпущено.
-- `PushResult.Err` — ошибка lifecycle-стадии, если она была.
-
-Статусы:
-
-- `PushStatusSkippedInactive`
-- `PushStatusSkippedAlreadyTriggered`
-- `PushStatusEmitted`
-- `PushStatusFailed`
-
-`Run` возвращает `([]R, error)` напрямую. Он создаёт одноразовый `State[F]` с текущим фактором, вызывает только `Build` и возвращает ошибку `Build`, если она была. `Run` не использует `StateRepository`, `TriggerMode`, `Stateful`, `Stabilize` и `Emit`.
-
-### Trigger Mode
-
-- `TriggerModeLevel` — выпускать факт каждый раз, когда `Evaluate` возвращает `true`.
-- `TriggerModeEdge` — выпускать факт только на новом переходе из неактивного состояния в активное.
-
-`TriggerMode` не заменяет `Evaluate`: он только уточняет, как интерпретировать активное состояние как импульс.
-
-### Callback Management
-
-- `Emit()` — получить текущий callback выпуска факта.
-- `SetEmit(cb)` — заменить callback выпуска факта.
-
-`SetEmit(nil)` паникует: факториат не может существовать без внешнего выпуска факта.
-
-## Stability Contract
-
-Эти правила считаются контрактом первой стабильной формы `go-factoriat`. Их изменение должно рассматриваться как breaking change.
-
-- Lifecycle остаётся линейным: `Capture -> Evaluate -> Build -> Stabilize -> Emit`.
-- `Build` обязателен при создании факториата; `Capture`, `Evaluate` и `Emit` обязательны только при `Stateful == true`.
-- Каждый lifecycle hook возвращает `error`; первая ошибка останавливает обработку и возвращается через `PushResult.Err`.
-- `Build` получает независимый `State` snapshot, строит `[]R` и не управляет живой памятью.
-- `Stabilize` получает живую память и является единственной пост-фактной стадией изменения состояния.
-- `Emit` выполняется после освобождения внутреннего mutex, по одному разу на каждый построенный факт, в порядке `[]R`.
-- `State` управляется только через публичные методы; внутренние поля памяти остаются закрытыми.
-- Репозиторий состояния хранит `StateRecord`, то есть и живую память, и `Triggered`.
-- Доменный meta-контекст должен использовать `MetaKey[T]`, чтобы ключ и тип значения были связаны.
-- `TriggerMode` не заменяет `Evaluate`; он только определяет, считать активное состояние уровнем или новым импульсом.
-- `PushResult` описывает runtime-исход обработки, а ошибки сборки конфигурации остаются ответственностью `Config.Validate`.
-- `Run` является отдельным stateless-путём: он не участвует в lifecycle `PushResult`, не меняет live-state и не выпускает факты через `Emit`.
-
-## Ментальная модель
-
-```mermaid
-flowchart LR
-    SIGNALS["Множество входных сигналов<br/>factor F"] --> MEMORY["Накопленная память<br/>State[F]"]
-    MEMORY --> GATE{"Правило активации<br/>Evaluate"}
-    GATE -- "не активно" --> HOLD["Ожидание<br/>состояние остаётся незавершённым"]
-    GATE -- "активно" --> FACT["Создание факта<br/>Build"]
-    FACT --> STABLE["Стабилизация памяти<br/>Stabilize"]
-    STABLE --> OUTPUT["Выпуск факта<br/>Emit"]
-    HOLD --> SIGNALS
-    OUTPUT -. "может породить новые сигналы" .-> SIGNALS
-```
-
-Эта схема показывает Factoriat как информационный транзистор. На вход приходит не один окончательный объект, а поток факторов. Каждый фактор может изменить внутреннюю память, но сам по себе не обязан создавать факт.
-
-`Evaluate` работает как затвор активации: он смотрит на накопленное состояние и решает, достаточно ли сигнала для срабатывания. Если условия ещё не выполнены, факториат остаётся в режиме ожидания и продолжает накапливать входы.
-
-Когда правило становится активным, `Build` превращает накопленный контекст в факт. После этого `Stabilize` переводит память в следующее устойчивое состояние: очищает её, сдвигает окно, оставляет часть контекста или помечает, что импульс уже был обработан.
-
-`Emit` находится в конце, потому что выпуск факта — это внешний эффект. Он может отправить факт наружу, запустить другой факториат или вернуть новый сигнал обратно в систему.
-
-## Устройство Factoriat
-
-```mermaid
-flowchart LR
-    IN["Входной фактор<br/>F"] --> FT
-
-    subgraph FT["Factoriat[F,R]"]
-        direction TB
-
-        CFG["Конфигурация<br/>правила жизненного цикла"]
-        MEM["Живая память<br/>State[F]"]
-        MODE["Режим срабатывания<br/>TriggerMode"]
-
-        subgraph LOCK["Внутренний цикл под mutex"]
-            direction TB
-            CAP["1. Capture<br/>захватить фактор в память"]
-            EVAL["2. Evaluate<br/>проверить активность"]
-            SNAP["3. Snapshot<br/>сделать снимок памяти"]
-            BUILD["4. Build<br/>собрать факт из снимка"]
-            STAB["5. Stabilize<br/>обновить живую память"]
-        end
-
-        CFG --> CAP
-        CFG --> EVAL
-        CFG --> BUILD
-        CFG --> STAB
-        MODE --> EVAL
-
-        MEM <--> CAP
-        MEM --> EVAL
-        MEM --> SNAP
-        SNAP --> BUILD
-        STAB --> MEM
-    end
-
-    BUILD --> FACT["Факт<br/>R"]
-    FACT --> EMIT["6. Emit<br/>callback вне mutex"]
-    EMIT --> OUT["Внешний мир"]
-    OUT -. "может вызвать новый Push" .-> IN
-```
-
-Эта схема показывает не порядок вызовов, а устройство самого блока. У факториата есть конфигурация правил, живая память, режим срабатывания и защищённый внутренний цикл обработки.
-
-`Capture`, `Evaluate`, `Snapshot`, `Build` и `Stabilize` выполняются внутри mutex, потому что они читают или меняют живую память. Это делает один вызов `PushResult` атомарным относительно live-state.
-
-`Build` получает не живую память, а снимок. Поэтому построение факта не может случайно испортить состояние факториата. Управление живой памятью остаётся в одном месте — в `Stabilize`.
-
-`TriggerMode` влияет на поведение затвора `Evaluate` на границе между состоянием и импульсом. В level-режиме активное состояние может выпускать факт при каждом входе. В edge-режиме факт выпускается только на новом переходе в активное состояние, пока стабилизация или неактивный вход не сбросят внутренний флаг.
-
-`Emit` вынесен за пределы mutex. Это принципиальная граница: внешний callback может быть долгим, может обращаться к другим компонентам и может снова вызвать `Push`, не блокируя внутреннюю память текущего факториата.
-
-## Канонические сценарии
-
-### 1. Threshold: порог накопления
-
-Факториату подходит сценарий, где отдельный входной фактор ещё не является фактом, но накопленное значение может перейти порог.
-
-```text
-purchase amount -> накопленная сумма -> сумма >= 1000 -> LargePurchaseFact
-```
-
-```go
-type LargePurchaseFact struct {
-	Total int
-}
-
-metaTotal := factoriat.NewMetaKey[int]("total")
-
-f := factoriat.MustNewFactoriat[int, LargePurchaseFact](factoriat.Config[int, LargePurchaseFact]{
-	Capture: func(st *factoriat.State[int], amount int) error {
-		factoriat.IncMetaInt(st, metaTotal, amount)
-		return nil
-	},
-	Evaluate: func(st *factoriat.State[int], _ int) (bool, error) {
-		return factoriat.MetaOr(st, metaTotal, 0) >= 1000, nil
-	},
-	Build: func(st *factoriat.State[int]) ([]LargePurchaseFact, error) {
-		return []LargePurchaseFact{{Total: factoriat.MetaOr(st, metaTotal, 0)}}, nil
-	},
-	Stabilize: func(st *factoriat.State[int]) error {
-		st.Reset()
-		return nil
-	},
-	Emit: func(fact LargePurchaseFact) error {
-		return nil
-	},
-})
-```
-
-Здесь `Capture` накапливает сумму в живой памяти, `Evaluate` открывает затвор только после порога, `Build` создаёт факт из snapshot, а `Stabilize` сбрасывает память для следующего накопления.
-
-### 2. Sliding window: окно событий
-
-Этот сценарий нужен, когда важна не вся история, а последние N входных факторов или ограниченный временной интервал.
-
-```text
-login failure -> последние 5 событий -> 5 ошибок подряд -> BruteForceFact
-```
-
-```go
-type LoginEvent struct {
-	UserID string
-	OK     bool
-}
-
-type BruteForceFact struct {
-	UserID string
-	Count  int
-}
-
-f := factoriat.MustNewFactoriat[LoginEvent, BruteForceFact](factoriat.Config[LoginEvent, BruteForceFact]{
-	Capture: func(st *factoriat.State[LoginEvent], event LoginEvent) error {
-		if event.OK {
-			st.Reset()
-			return nil
-		}
-		st.Append(event)
-		st.TrimLast(5)
-		return nil
-	},
-	Evaluate: func(st *factoriat.State[LoginEvent], _ LoginEvent) (bool, error) {
-		return st.Count() == 5, nil
-	},
-	Build: func(st *factoriat.State[LoginEvent]) ([]BruteForceFact, error) {
-		events := st.DataSnapshot()
-		return []BruteForceFact{{
-			UserID: events[0].UserID,
-			Count:  st.Count(),
-		}}, nil
-	},
-	Stabilize: func(st *factoriat.State[LoginEvent]) error {
-		st.Reset()
-		return nil
-	},
-	Emit: func(fact BruteForceFact) error {
-		return nil
-	},
-})
-```
-
-Здесь живая память работает как окно. `Capture` добавляет только неуспешные события, успешный логин сбрасывает окно, а `Stabilize` очищает память после выпуска факта.
-
-### 3. Edge trigger: новый импульс
-
-Edge-режим нужен, когда важно отличать новый переход в активное состояние от ситуации, где состояние просто всё ещё истинно.
-
-```text
-risk score -> risk >= 80 -> первый переход в risk state -> RiskEnteredFact
-```
-
-```go
-type RiskFact struct {
-	Score int
-}
-
-metaScore := factoriat.NewMetaKey[int]("score")
-
-f := factoriat.MustNewFactoriat[int, RiskFact](factoriat.Config[int, RiskFact]{
-	TriggerMode: factoriat.TriggerModeEdge,
-	Stateful:    true,
-	Capture: func(st *factoriat.State[int], score int) error {
-		factoriat.SetMeta(st, metaScore, score)
-		return nil
-	},
-	Evaluate: func(st *factoriat.State[int], _ int) (bool, error) {
-		return factoriat.MetaOr(st, metaScore, 0) >= 80, nil
-	},
-	Build: func(st *factoriat.State[int]) ([]RiskFact, error) {
-		return []RiskFact{{Score: factoriat.MetaOr(st, metaScore, 0)}}, nil
-	},
-	Emit: func(fact RiskFact) error {
-		return nil
-	},
-})
-```
-
-Первый вход с `score >= 80` создаст факт. Следующие входы с активным состоянием будут возвращать `PushStatusSkippedAlreadyTriggered`, пока `Evaluate` не станет `false` или `Stabilize` явно не сбросит состояние.
-
-### 4. Pipeline: цепочка факториатов
-
-`Emit` можно использовать как связку между факториатами: факт одного блока становится входным фактором другого.
-
-```text
-LoginEvent -> SuspiciousLoginFact -> SecurityAlertFact
-```
-
-```go
-type SuspiciousLoginFact struct {
-	UserID string
-}
-
-type SecurityAlertFact struct {
-	UserID string
-	Level  string
-}
-
-alerts := factoriat.MustNewFactoriat[SuspiciousLoginFact, SecurityAlertFact](factoriat.Config[SuspiciousLoginFact, SecurityAlertFact]{
-	Capture: func(st *factoriat.State[SuspiciousLoginFact], fact SuspiciousLoginFact) error {
-		st.Append(fact)
-		return nil
-	},
-	Evaluate: func(st *factoriat.State[SuspiciousLoginFact], _ SuspiciousLoginFact) (bool, error) {
-		return st.Count() >= 1, nil
-	},
-	Build: func(st *factoriat.State[SuspiciousLoginFact]) ([]SecurityAlertFact, error) {
-		fact, _ := st.Last()
-		return []SecurityAlertFact{{UserID: fact.UserID, Level: "high"}}, nil
-	},
-	Emit: func(fact SecurityAlertFact) error {
-		return nil
-	},
-})
-
-logins := factoriat.MustNewFactoriat[LoginEvent, SuspiciousLoginFact](factoriat.Config[LoginEvent, SuspiciousLoginFact]{
-	Capture: func(st *factoriat.State[LoginEvent], event LoginEvent) error {
-		if !event.OK {
-			st.Append(event)
-		}
-		return nil
-	},
-	Evaluate: func(st *factoriat.State[LoginEvent], _ LoginEvent) (bool, error) {
-		return st.Count() >= 3, nil
-	},
-	Build: func(st *factoriat.State[LoginEvent]) ([]SuspiciousLoginFact, error) {
-		event, _ := st.Last()
-		return []SuspiciousLoginFact{{UserID: event.UserID}}, nil
-	},
-	Stabilize: func(st *factoriat.State[LoginEvent]) error {
-		st.Reset()
-		return nil
-	},
-	Emit: func(fact SuspiciousLoginFact) error {
-		alerts.Push(fact)
-		return nil
-	},
-})
-```
-
-Этот сценарий показывает, зачем `Emit` выполняется вне mutex. Callback может безопасно вызвать `Push` другого факториата и собрать систему из небольших независимых информационных транзисторов.
-
-## Диаграмма последовательности
-
-```mermaid
-sequenceDiagram
-    title Жизненный цикл Factoriat.PushResult
-
-    actor C as Client
-    participant F as Factoriat[F,R]
-    participant S as live State[F]
-    participant CR as CaptureRule
-    participant ER as EvaluateRule
-    participant BR as BuildRule
-    participant ST as StabilizeRule
-    participant EM as Emit callback
-
-    C ->> F: PushResult(factor F)
-    activate F
-
-    Note right of F: 0. Вход в критическую секцию: lock mutex.
-
-    F ->> CR: 1. Capture(&state, factor)
-    CR ->> S: записать фактор, обновить буфер/счётчики/meta
-
-    F ->> ER: 2. Evaluate(&state, factor)?
-    ER -->> F: active / inactive
-
-    alt error на любой внутренней стадии
-        F -->> C: PushStatusFailed + Err
-    else no error
-    end
-
-    alt 2a. inactive
-        F ->> S: triggered = false
-        F -->> C: PushStatusSkippedInactive
-    else 2b. active и edge уже активирован
-        F -->> C: PushStatusSkippedAlreadyTriggered
-    else 2c. active и можно выпускать факт
-        F ->> S: 3. Snapshot()
-        F ->> BR: 4. Build(&snapshot)
-        BR -->> F: fact R
-
-        alt 5a. Stabilize задан
-            F ->> ST: Stabilize(&state)
-            ST ->> S: новое устойчивое состояние
-            F ->> S: triggered = false
-        else 5b. Stateful == false
-            F ->> S: state = NewState[F]()
-            F ->> S: triggered = false
-        else 5c. Stateful == true
-            F ->> S: triggered = true
-        end
-
-        F -->> C: 6. unlock internal state
-        F ->> EM: 7. Emit(fact R)
-        EM -->> F: callback завершён
-        F -->> C: 8. PushStatusEmitted
-    end
-
-    deactivate F
-```
-
-## Жизненный цикл
-
-### 0. Lock
-
-`PushResult` входит в критическую секцию и удерживает mutex на время работы с живой памятью. Под lock выполняются только внутренние стадии: `Capture`, `Evaluate`, `Build` и `Stabilize`/reset. Внешний `Emit` намеренно выполняется после unlock.
-
-### 1. Capture
-
-`Capture(&state, factor)` принимает входной фактор и записывает его в живую память факториата. Здесь обычно обновляются буфер факторов, счётчики, meta-значения или доменные агрегаты через методы `Append`, `TrimLast`, `ClearData`, `SetMeta`, `MetaOr`, `IncMetaInt`.
-
-Это обязательный шаг: факториат не существует без правила захвата сигнала.
-
-Если `Capture` возвращает ошибку, дальнейшие стадии не выполняются, а `PushResult.Err` содержит причину отказа.
-
-### 2. Evaluate
-
-`Evaluate(&state, factor)` смотрит на живую память после `Capture` и работает как затвор активации: решает, активирован ли факториат.
-
-Возможные исходы:
-
-- `inactive` — правило не сработало, `triggered` сбрасывается в `false`, возвращается `PushStatusSkippedInactive`.
-- `active`, но `TriggerModeEdge` уже активирован — нового импульса нет, возвращается `PushStatusSkippedAlreadyTriggered`.
-- `active` и выпуск разрешён — жизненный цикл переходит к построению факта.
-
-Если `Evaluate` возвращает ошибку, она возвращается как `PushStatusFailed`.
-
-### 3. Snapshot
-
-Перед `Build` факториат создаёт независимый `State` snapshot. Это граница между живой памятью и построением факта: `Build` может читать снимок, но его случайные мутации не попадут обратно в live-state.
-
-### 4. Build
-
-`Build(&snapshot)` строит выходной факт `R`. Этот шаг должен быть чистым по отношению к памяти факториата: он превращает накопленный контекст в факт, но не управляет live-state.
-
-Если `Build` возвращает ошибку, lifecycle останавливается до стабилизации и выпуска факта.
-
-### 5. Stabilize
-
-После построения факта факториат приводит live-state в новое устойчивое состояние.
-
-Если задан `Stabilize`, он получает живую память и сам решает, что оставить, удалить, сдвинуть или пометить. Если `Stabilize` не задан и `Stateful == false`, состояние сбрасывается через `NewState`. Если `Stateful == true`, состояние остаётся, а `triggered` фиксирует, что edge-режим уже активирован.
-
-Если `Stabilize` возвращает ошибку, `Emit` не вызывается.
-
-### 6. Unlock
-
-После стабилизации mutex освобождается. С этого момента внутреннее состояние уже завершило цикл обработки входного фактора.
-
-### 7. Emit
-
-`Emit(fact)` вызывается вне lock. Это важно: callback может безопасно отправить новый фактор в тот же или другой факториат, не создавая deadlock на внутреннем mutex.
-
-Если `Emit` возвращает ошибку, она возвращается как `PushStatusFailed`. К этому моменту внутреннее состояние уже стабилизировано, потому что выпуск факта происходит после unlock.
-
-### 8. Result
-
-`PushResult` возвращает runtime-исход обработки:
-
-- `PushStatusSkippedInactive`
-- `PushStatusSkippedAlreadyTriggered`
-- `PushStatusEmitted`
-- `PushStatusFailed`
-
-Ошибки сборки конфигурации не являются runtime-исходами: неполный факториат отклоняется конструктором через `Config.Validate`. Ошибки выполнения стадий возвращаются в `PushResult.Err`.
+## Руководство
+
+Руководство разложено по главам: от ментальной модели к практике применения.
+
+1. [Что такое Factoriat](docs/01-what-is-factoriat.md)
+2. [Базовая модель: Factor -> Predicates -> Facts -> Apply](docs/02-basic-model.md)
+3. [Factor](docs/03-factor.md)
+4. [Predicates](docs/04-predicates.md)
+5. [Facts](docs/05-facts.md)
+6. [Build Rules](docs/06-build-rules.md)
+7. [Run / Stateful / Stateless](docs/07-run-stateful-stateless.md)
+8. [Apply Facts](docs/08-apply-facts.md)
+9. [Тестирование](docs/09-testing.md)
+10. [Антипаттерны](docs/10-antipatterns.md)
